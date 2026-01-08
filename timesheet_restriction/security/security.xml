@@ -1,0 +1,6 @@
+<odoo>
+    <record id="group_can_reduce_past_timesheets" model="res.groups">
+        <field name="name">Can Reduce Past Timesheets</field>
+        <field name="comment">Allows editing and reducing timesheets from past months.</field>
+    </record>
+</odoo>

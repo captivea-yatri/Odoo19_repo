@@ -1,0 +1,22 @@
+<odoo>
+    <record id="view_account_analytic_line_form_inherit_ksc" model="ir.ui.view">
+        <field name="name">account.analytic.line.form.inherit.ksc</field>
+        <field name="model">account.analytic.line</field>
+        <field name="inherit_id" ref="analytic.view_account_analytic_line_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//sheet" position="inside">
+
+                <!-- Shown only to users WITH the special group -->
+                <div class="alert alert-warning" groups="timesheet_restriction.group_can_reduce_past_timesheets">
+                    <span>⚠️ You can edit past-month entries because you have special permission.</span>
+                </div>
+
+                <!-- Shown to normal users only (not in the above group) -->
+                <div class="alert alert-danger" groups="base.group_user -timesheet_restriction.group_can_reduce_past_timesheets">
+                    <span>🚫 Editing past-month analytic entries is restricted. Contact your administrator for access.</span>
+                </div>
+
+            </xpath>
+        </field>
+    </record>
+</odoo>
