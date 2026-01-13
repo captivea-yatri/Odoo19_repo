@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <template id="report_invoice_document" inherit_id="account.report_invoice_document">
+        <xpath expr="//td[@name='account_invoice_line_name']" position="inside">
+           <t t-if="line.lot_id">
+                <div style="font-size: 11px; color: #555;">
+                    <strong>Lot/Serial:</strong>
+                    <span t-esc="line.lot_id.name"/>
+                </div>
+            </t>
+        </xpath>
+    </template>
+</odoo>

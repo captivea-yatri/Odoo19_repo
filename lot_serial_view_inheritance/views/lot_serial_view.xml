@@ -1,0 +1,19 @@
+<odoo>
+    <data>
+        <record id="view_order_form_inherit_lot" model="ir.ui.view">
+            <field name="name">sale.order.form.inherit.lot</field>
+            <field name="model">sale.order</field>
+            <field name="inherit_id" ref="sale.view_order_form"/>
+            <field name="arch" type="xml">
+
+                <!-- Add Lot/Serial Number after Product -->
+                <xpath expr="//page[@name='order_lines']//field[@name='order_line']/list/field[@name='product_template_id']" position="after">
+                    <field name="lot_id" string="Lot/Serial Number"/>
+                </xpath>
+
+
+
+            </field>
+        </record>
+    </data>
+</odoo>
