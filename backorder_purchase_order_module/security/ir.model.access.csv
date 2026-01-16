@@ -1,0 +1,5 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_backorder_purchase_order,backorder.purchase.order,model_backorder_purchase_order,base.group_user,1,1,1,1
+access_backorder_purchase_order_line,backorder.purchase.order.line,model_backorder_purchase_order_line,base.group_user,1,1,1,1
+access_backorder_purchase_order_line_update,backorder.purchase.order.line.update,model_backorder_purchase_update_wizard,,1,1,1,1
+access_backorder_purchase_order_line_update_wizard,backorder.purchase.order.line.update.wizard,model_backorder_purchase_update_wizard_line,,1,1,1,1

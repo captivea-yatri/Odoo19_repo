@@ -1,0 +1,54 @@
+<odoo>
+    <!-- Wizard Form View -->
+    <record id="view_backorder_purchase_update_wizard_form" model="ir.ui.view">
+        <field name="name">backorder.purchase.update.wizard.form</field>
+        <field name="model">backorder.purchase.update.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Update Backorder Purchase Order" class="o_form_editable">
+                <sheet>
+                    <!-- ===== TOP SECTION: General Info ===== -->
+                    <group>
+                        <group>
+                            <field name="order_id" readonly="1"/>
+                            <field name="vendor_id"/>
+                        </group>
+                    </group>
+
+                    <separator string="Order Lines" colspan="4"/>
+
+                    <!-- ===== BOTTOM SECTION: Editable Lines ===== -->
+                    <field name="line_ids">
+                        <list editable="bottom" create="true" delete="true" string="Order Lines">
+                            <field name="product_id"/>
+                            <field name="vendor_id"/>
+                            <field name="quantity"/>
+                            <field name="price"/>
+                            <field name="total" readonly="1"/>
+                        </list>
+                    </field>
+                </sheet>
+
+                <footer>
+                    <button string="Apply Updates"
+                            name="action_apply_updates"
+                            type="object"
+                            class="btn-primary"/>
+                    <button string="Cancel"
+                            class="btn-secondary"
+                            special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <!-- Wizard Action -->
+    <record id="action_backorder_purchase_update_wizard" model="ir.actions.act_window">
+        <field name="name">Update Backorder Purchase Order</field>
+        <field name="res_model">backorder.purchase.update.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="view_id" ref="view_backorder_purchase_update_wizard_form"/>
+        <field name="target">new</field>
+        <!-- context now empty: active_id is passed automatically by action_open_update_wizard -->
+        <field name="context">{}</field>
+    </record>
+</odoo>

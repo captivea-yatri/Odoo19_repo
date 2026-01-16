@@ -1,0 +1,11 @@
+
+<odoo>
+    <data>
+        <record id="action_backorder_purchase_order" model="ir.actions.act_window">
+            <field name="name">Backorder Purchase Orders</field>
+            <field name="res_model">backorder.purchase.order</field>
+            <field name="view_mode">list,form</field>
+            <field name="context">{}</field>
+        </record>
+    </data>
+</odoo>

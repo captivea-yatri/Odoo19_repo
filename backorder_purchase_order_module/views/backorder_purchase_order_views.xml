@@ -1,0 +1,73 @@
+
+<odoo>
+    <data>
+        <record id="view_backorder_purchase_order_list" model="ir.ui.view">
+            <field name="name">backorder.purchase.order.list</field>
+            <field name="model">backorder.purchase.order</field>
+            <field name="arch" type="xml">
+                <list>
+                    <field name="name"/>
+                    <field name="state"/>
+                </list>
+            </field>
+        </record>
+
+        <record id="view_backorder_purchase_order_form" model="ir.ui.view">
+            <field name="name">backorder.purchase.order.form</field>
+            <field name="model">backorder.purchase.order</field>
+            <field name="arch" type="xml">
+                <form string="Backorder Purchase Order">
+                    <header>
+                        <button name="action_confirm" string="Confirm" type="object" class="btn-primary"
+                                invisible="state == 'confirm'"/>
+<!--                        <button name="action_set_to_draft" string="Set to Draft" type="object" class="btn-secondary"-->
+<!--                                invisible="state == 'draft'"/>-->
+<!--                        <button name="action_view_account_move" string="View Journal Entry" type="object" class="btn-secondary"-->
+<!--                                invisible="account_move_id ==  'False'"/>-->
+                        <button  name="action_open_update_wizard" string="Update" type="object" class="btn-secondary"
+                                invisible="state == 'draft'"/>
+                        <field name="state" widget="statusbar" readonly="1"/>
+                    </header>
+                    <sheet>
+                        <div class="oe_button_box" name="button_box">
+                            <button name="action_view_stock_moves"
+                                type="object"
+                                class="oe_stat_button"
+                                icon="fa-pencil-square-o" string="Moves">
+                            </button>
+                            <button name="action_view_account_move"
+                                type="object"
+                                class="oe_stat_button"
+                               string="View Journal Entry">
+                            </button>
+                        </div>
+                        <group>
+                            <field name="name" readonly="1"/>
+                            <field name="vendor_id" readonly="state == 'confirm'"/>
+                        </group>
+                        <notebook>
+                            <page name="purchase_line" string="Lines">
+                                <field name="order_line" widget="one2many_list"  readonly="state == 'confirm'">
+                                    <list editable="bottom">
+                                        <field name="product_id" />
+                                        <field name="vendor_id" />
+                                        <field name="quantity" />
+                                        <field name="price" />
+                                        <field name="total" />
+                                    </list>
+                                </field>
+                            </page>
+                        </notebook>
+                    </sheet>
+                    <!-- Chatter -->
+                    <chatter/>
+                </form>
+            </field>
+        </record>
+
+        <menuitem id="menu_backorder_purchase" name="Backorder Purchase Orders"
+                  parent="purchase.menu_purchase_root" sequence="26"
+                  action="backorder_purchase_order_module.action_backorder_purchase_order"/>
+
+    </data>
+</odoo>
