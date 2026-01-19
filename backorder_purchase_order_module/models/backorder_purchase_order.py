@@ -13,13 +13,20 @@ class BackorderPurchaseOrder(models.Model):
         ('draft', 'Draft'),
         ('confirm', 'Confirmed'),
     ], default='draft', string='Status')
-    company_id = fields.Many2one('res.company', string='Company', required=True, default=lambda self: self.env.company)
+    company_id = fields.Many2one('res.company', string='Vendor', required=True, default=lambda self: self.env.company)
 
     order_line = fields.One2many('backorder.purchase.order.line', 'order_id', string='Order Lines')
     move_ids = fields.Many2many('stock.move', 'bo_purchase_stock_move_rel', 'bo_purchase_id', 'move_id',
                                 string="Stock Moves")
-    vendor_id = fields.Many2one('res.partner', string='Vendor', required=True)
+    vendor_id = fields.Many2one('res.partner', string='Company', required=True)
     account_move_id = fields.Many2one('account.move', string='Journal Entry', readonly=True)
+    account_move_ids = fields.Many2many(
+        'account.move',
+        'bo_purchase_account_move_rel',
+        'bo_purchase_id', 'move_id',
+        string='Journal Entries',
+        readonly=True
+    )
 
     @api.onchange('vendor_id')
     def _onchange_vendor_id_set_on_lines(self):
@@ -58,101 +65,124 @@ class BackorderPurchaseOrder(models.Model):
             if order.state != 'draft':
                 raise UserError(_("You can only confirm a draft order."))
 
-            # Group lines by vendor
-            vendor_groups = {}
+            vendor = order.vendor_id
+            vendor_location = vendor.property_stock_supplier or self.env.ref('stock.stock_location_suppliers')
+            stock_location = self.env.ref('stock.stock_location_stock')
+
+            total_amount = 0.0
+            created_moves = []
+
+            # ✅ Group by product (only one move per product)
+            product_groups = {}
             for line in order.order_line:
-                vendor_groups.setdefault(line.vendor_id, []).append(line)
+                key = line.product_id.id
+                if key not in product_groups:
+                    product_groups[key] = {
+                        'product': line.product_id,
+                        'qty': line.quantity,
+                        'price': line.price,
+                        'vendor': line.vendor_id,
+                    }
+                else:
+                    product_groups[key]['qty'] += line.quantity
 
-            for vendor, lines in vendor_groups.items():
-                vendor_location = vendor.property_stock_supplier or self.env.ref('stock.stock_location_suppliers')
-                stock_location = self.env.ref('stock.stock_location_stock')
+            # ✅ Create one move per product
+            for data in product_groups.values():
+                product = data['product']
+                qty = data['qty']
+                price_unit = data['price']
+                vendor_line = data['vendor']
+                total_value = qty * price_unit
+                total_amount += total_value
 
-                total_amount = 0.0
-                created_moves = []
+                # ✅ Create Stock Move (sets both reference + origin)
+                move = self.env['stock.move'].create({
+                    'product_id': product.id,
+                    'product_uom': product.uom_id.id,
+                    'location_id': vendor_location.id,
+                    'location_dest_id': stock_location.id,
+                    'product_uom_qty': qty,
+                    'price_unit': price_unit,
+                    'value': total_value,  # quantity × price
+                    'state': 'draft',
+                    'origin': order.name,  # appears in stock move & product history
+                    'reference': order.name,  # also appears in product move tab
+                    'company_id': order.company_id.id,
+                    'partner_id': vendor_line.id,
+                })
 
-                # ✅ Create stock moves (one per product line)
-                for line in lines:
-                    total_amount += line.total
-                    move = self.env['stock.move'].create({
-                        'product_id': line.product_id.id,
-                        'product_uom': line.product_id.uom_id.id,
-                        'location_id': vendor_location.id,
-                        'location_dest_id': stock_location.id,
-                        'product_uom_qty': line.quantity,
-                        'price_unit': line.price,
-                        'state': 'draft',
-                        'origin': order.name,  # visible in Move History
-                        'reference': order.name,  # ✅ native Odoo field — shown in product move history
-                        'value': line.total,
-                        'company_id': order.company_id.id,
-                    })
+                # ✅ Add move line
+                self.env['stock.move.line'].create({
+                    'move_id': move.id,
+                    'product_id': product.id,
+                    'product_uom_id': product.uom_id.id,
+                    'qty_done': qty,
+                    'location_id': vendor_location.id,
+                    'location_dest_id': stock_location.id,
+                    'company_id': order.company_id.id,
+                })
 
-                    self.env['stock.move.line'].create({
-                        'move_id': move.id,
-                        'product_id': line.product_id.id,
-                        'product_uom_id': line.product_id.uom_id.id,
-                        'qty_done': line.quantity,
-                        'location_id': vendor_location.id,
-                        'location_dest_id': stock_location.id,
-                        'company_id': order.company_id.id,
-                    })
+                # Process the move
+                move._action_confirm()
+                move._action_assign()
+                move._action_done()
 
-                    move._action_confirm()
-                    move._action_assign()
-                    move._action_done()
-                    created_moves.append(move.id)
+                # ✅ Ensure reference persists after done
+                move.write({
+                    'value': qty * price_unit,
+                    'origin': order.name,
+                    'reference': order.name,
+                })
 
-                # Link moves to order
-                if created_moves:
-                    order.move_ids = [(6, 0, created_moves)]
+                created_moves.append(move.id)
 
-                # ✅ Create one accounting entry per vendor group (not per line)
-                if total_amount <= 0:
-                    raise UserError(_("Cannot create a Journal Entry without a total amount."))
+            # ✅ Link moves to order
+            if created_moves:
+                order.move_ids = [(6, 0, created_moves)]
 
-                expense_account = self.env['account.account'].search([
-                    ('account_type', '=', 'expense')
-                ], limit=1)
-                payable_account = self.env['account.account'].search([
-                    ('account_type', '=', 'liability_payable')
-                ], limit=1)
-                journal = self.env['account.journal'].search([('type', '=', 'general')], limit=1)
+            # ✅ Accounting entry (as before)
+            if total_amount <= 0:
+                raise UserError(_("Cannot create a Journal Entry without a total amount."))
 
-                if not (expense_account and payable_account and journal):
-                    raise UserError(_("Please configure Expense, Payable accounts and a General Journal."))
+            expense_account = self.env['account.account'].search([('account_type', '=', 'expense')], limit=1)
+            payable_account = self.env['account.account'].search([('account_type', '=', 'liability_payable')], limit=1)
+            journal = self.env['account.journal'].search([('type', '=', 'general')], limit=1)
 
-                move_vals = {
-                    'move_type': 'entry',
-                    'journal_id': journal.id,
-                    'date': fields.Date.context_today(self),
-                    'ref': order.name,  # ✅ Use 'ref' (correct field) for account.move
-                    'line_ids': [
-                        # Debit Expense
-                        (0, 0, {
-                            'name': f'Backorder Purchase Expense ({order.name})',
-                            'account_id': expense_account.id,
-                            'debit': total_amount,
-                            'credit': 0.0,
-                            'partner_id': vendor.id,
-                        }),
-                        # Credit Payable
-                        (0, 0, {
-                            'name': f'Payable to Vendor ({order.name})',
-                            'account_id': payable_account.id,
-                            'credit': total_amount,
-                            'debit': 0.0,
-                            'partner_id': vendor.id,
-                        }),
-                    ]
-                }
+            if not (expense_account and payable_account and journal):
+                raise UserError(_("Please configure Expense, Payable accounts and a General Journal."))
 
-                account_move = self.env['account.move'].create(move_vals)
-                account_move.action_post()
-                order.account_move_id = account_move.id
+            move_vals = {
+                'move_type': 'entry',
+                'journal_id': journal.id,
+                'date': fields.Date.context_today(self),
+                'ref': order.name,
+                'line_ids': [
+                    (0, 0, {
+                        'name': f'Backorder Purchase Expense ({order.name})',
+                        'account_id': expense_account.id,
+                        'debit': total_amount,
+                        'credit': 0.0,
+                        'partner_id': order.order_line[0].vendor_id.id,
+                    }),
+                    (0, 0, {
+                        'name': f'Payable to Vendor ({order.name})',
+                        'account_id': payable_account.id,
+                        'credit': total_amount,
+                        'debit': 0.0,
+                        'partner_id': order.order_line[0].vendor_id.id,
+                    }),
+                ]
+            }
 
+            account_move = self.env['account.move'].create(move_vals)
+            account_move.action_post()
+            order.account_move_id = account_move.id
+
+            # ✅ Mark confirmed
             order.state = 'confirm'
             order.message_post(
-                body=_("Backorder Purchase Order <b>%s</b> has been confirmed.") % order.name,
+                body=_("Backorder Purchase Order <b>%s</b> confirmed. "
+                       "<br/>Stock Moves updated with reference & total value.") % order.name,
                 subtype_xmlid="mail.mt_note"
             )
 
@@ -243,12 +273,4 @@ class BackorderPurchaseOrderLine(models.Model):
         for line in self:
             if line.order_id and line.order_id.vendor_id:
                 line.vendor_id = line.order_id.vendor_id
-
-    def write(self, vals):
-        if self.env.context.get('allow_wizard_write'):
-            return super().write(vals)
-
-        if self.order_id and self.order_id.state == 'confirm':
-            raise UserError(_("You cannot modify lines of a confirmed order directly. Please use the Update Wizard."))
-        return super().write(vals)
 
