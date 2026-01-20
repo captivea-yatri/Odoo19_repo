@@ -83,7 +83,9 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
                 'quantity': wiz_line.quantity,
                 'price': wiz_line.price,
             }
+            print('\n\n\n\ >?>>>>>>>>>>>>>>', wiz_line, wiz_line.line_id)
             if wiz_line.line_id:
+                print('\n\n\n\n\ we are >>>>>>>>>>>>>>>>>.')
                 wiz_line.line_id.with_context(ctx).write(vals)
                 line = wiz_line.line_id
             else:
@@ -109,13 +111,15 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
             order.message_post(
                 body=_("Vendor changed from <b>%s</b> to <b>%s</b> via Update Wizard.") %
                      (old_vendor.display_name, self.vendor_id.display_name),
-                subtype_xmlid="mail.mt_note"
+                subtype_xmlid="mail.mt_note",
+                body_is_html=True
             )
         if order.account_move_id:
             order.account_move_id.message_post(
                 body=_("Vendor updated from <b>%s</b> to <b>%s</b> (Backorder: %s)") %
                      (old_vendor.display_name, self.vendor_id.display_name, order.name),
-                subtype_xmlid="mail.mt_note"
+                subtype_xmlid="mail.mt_note",
+                body_is_html=True
             )
 
         return {'type': 'ir.actions.act_window_close'}
@@ -124,141 +128,72 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
     # Stock move handling
     # ------------------------------------------------------------
     def _update_or_create_stock_moves(self, order):
-        """Recreate stock moves based on updated lines — ensure one move per product per vendor, correct total value."""
         StockMove = self.env['stock.move']
         StockMoveLine = self.env['stock.move.line']
 
         new_moves = []
+        vendor_location = order.vendor_id.property_stock_supplier or self.env.ref('stock.stock_location_suppliers')
+        stock_location = self.env.ref('stock.stock_location_stock')
 
-
-        # Group lines by vendor
-        vendor_groups = {}
         for line in order.order_line.filtered('active'):
-            vendor_groups.setdefault(line.vendor_id, []).append(line)
+            product = line.product_id
+            qty = line.quantity
+            price_unit = line.price
+            total_value = qty * price_unit
 
-        for vendor, lines in vendor_groups.items():
-            vendor_location = vendor.property_stock_supplier or self.env.ref('stock.stock_location_suppliers')
-            stock_location = self.env.ref('stock.stock_location_stock')
+            move = StockMove.search([
+                ('backorder_line_id', '=', line.id)])
+            print('\n\n\n\n >>>>>>>>>>>>>>>>>>>', line, move)
+            if move:
+                # Update
+                move.write({
+                    'product_uom_qty': qty,
+                    'price_unit': price_unit,
+                    'value': total_value,
+                })
 
-            # Group by product (aggregate qty and weighted avg price)
-            product_groups = {}
-            for line in lines:
-                product = line.product_id
-                key = (product.id, vendor.id)
-                if key not in product_groups:
-                    product_groups[key] = {
-                        'product': product,
-                        'qty': line.quantity,
-                        'price': line.price,
-                    }
-                else:
-                    total_qty = product_groups[key]['qty'] + line.quantity
-                    if total_qty > 0:
-                        product_groups[key]['price'] = (
-                                                               (product_groups[key]['price'] * product_groups[key][
-                                                                   'qty']) +
-                                                               (line.price * line.quantity)
-                                                       ) / total_qty
-                    product_groups[key]['qty'] = total_qty
+                if move.move_line_ids:
+                    move.move_line_ids.write({'qty_done': qty})
+            else:
+                # Create new move for new line
+                move = StockMove.create({
+                    'product_id': product.id,
+                    'product_uom': product.uom_id.id,
+                    'product_uom_qty': qty,
+                    'price_unit': price_unit,
+                    'value': total_value,
+                    'location_id': vendor_location.id,
+                    'location_dest_id': stock_location.id,
+                    'origin': order.name,
+                    'reference': order.name,
+                    'company_id': order.company_id.id,
+                    'partner_id': line.vendor_id.id,
+                    'backorder_line_id': line.id,
+                    'state': 'draft',
+                })
 
-            existing_moves = order.move_ids.filtered(lambda m: m.partner_id == vendor)
+                StockMoveLine.create({
+                    'move_id': move.id,
+                    'product_id': product.id,
+                    'product_uom_id': product.uom_id.id,
+                    'qty_done': qty,
+                    'location_id': vendor_location.id,
+                    'location_dest_id': stock_location.id,
+                    'company_id': order.company_id.id,
+                })
 
-            # ✅ Remove old moves for products not in new lines
-            existing_products = [p['product'].id for p in product_groups.values()]
-            for move in existing_moves:
-                if move.product_id.id not in existing_products:
-                    if move.state == 'done':
-                        self._create_return_move(move)
-                    else:
-                        move.unlink()
-
-            # ✅ Handle each grouped product
-            for data in product_groups.values():
-                product = data['product']
-                qty = data['qty']
-                price_unit = data['price']
-                total_value = qty * price_unit
-                create_moves_list = {'product_id': product.id,
-                                     'product_uom': product.uom_id.id,
-                                     'product_uom_qty': qty,
-                                     'price_unit': price_unit,
-                                     'value': total_value,
-                                     'location_id': vendor_location.id,
-                                     'location_dest_id': stock_location.id,
-                                     'origin': order.name,
-                                     'reference': order.name,
-                                     'company_id': order.company_id.id,
-                                     'partner_id': vendor.id,
-                                     'state': 'draft', }
-
-
-                # ✅ Check if move already exists for this product & vendor
-                existing_move = existing_moves.filtered(lambda m: m.product_id == product)
-
-                # If multiple exist, keep one and delete duplicates
-                if len(existing_move) > 1:
-                    existing_move[1:].unlink()
-                    existing_move = existing_move[:1]
-
-                if existing_move:
-                    move = existing_move[0]
-
-
-
-                    # ✅ If existing move found, update it instead of creating a new one
-                    if move.state == 'done':
-                        self._create_return_move(move)
-                        move = StockMove.create(create_moves_list)
-                    else:
-                        move.write({
-                            'product_uom_qty': qty,
-                            'price_unit': price_unit,
-                            'value': total_value,
-                            'origin': order.name,
-                            'reference': order.name,
-                        })
-
-                        # ✅ Update or create move line
-                        if move.move_line_ids:
-                            move.move_line_ids.write({
-                                'qty_done': qty,
-                                'location_id': vendor_location.id,
-                                'location_dest_id': stock_location.id,
-                            })
-                        else:
-                            StockMoveLine.create({'move_id': move.id,
-                                             'product_id': product.id,
-                                             'product_uom_id': product.uom_id.id,
-                                             'qty_done': qty,
-                                             'location_id': vendor_location.id,
-                                             'location_dest_id': stock_location.id,
-                                             'company_id': order.company_id.id,})
-                else:
-                    # ✅ Only create a new move if none exists
-                    move = StockMove.create(create_moves_list)
-
-                    StockMoveLine.create({'move_id': move.id,
-                                             'product_id': product.id,
-                                             'product_uom_id': product.uom_id.id,
-                                             'qty_done': qty,
-                                             'location_id': vendor_location.id,
-                                             'location_dest_id': stock_location.id,
-                                             'company_id': order.company_id.id,})
-
-                # ✅ Confirm and complete the move
                 move._action_confirm()
                 move._action_assign()
                 move._action_done()
 
-                move.sudo().write({'value': total_value, 'reference': order.name})
-                new_moves.append(move.id)
+            move.sudo().write({'value': total_value,'reference': order.name})
+            new_moves.append(move.id)
 
-            # ✅ Link back all moves (no duplicates)
-            if new_moves:
-                order.write({'move_ids': [(6, 0, list(set(order.move_ids.ids + new_moves)))]})
+        if new_moves:
+            order.write({'move_ids': [(6, 0, list(set(order.move_ids.ids + new_moves)))]})
 
     def _create_return_move(self, move):
-        """Create a reversal stock move for an already done move."""
+        """Reverse a done stock move safely and keep proper reference."""
         StockMove = self.env['stock.move']
 
         return_move = StockMove.create({
@@ -266,16 +201,17 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
             'product_uom': move.product_uom.id,
             'product_uom_qty': move.product_uom_qty,
             'price_unit': move.price_unit,
-            'location_id': move.location_dest_id.id,  # reversed direction
+            'value': move.value,
+            'location_id': move.location_dest_id.id,  # reverse direction
             'location_dest_id': move.location_id.id,
-            'origin': move.origin + ' (Return)',
-            'reference': move.reference,
+            'origin': f"Return of {move.origin or move.reference}",
+            'reference': f"{move.reference or move.origin} (Reversal)",
             'company_id': move.company_id.id,
             'partner_id': move.partner_id.id,
             'state': 'draft',
         })
 
-        # Reverse stock quantities
+        # Reverse quantities
         self.env['stock.move.line'].create({
             'move_id': return_move.id,
             'product_id': move.product_id.id,
@@ -286,10 +222,14 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
             'company_id': move.company_id.id,
         })
 
-        # Confirm and complete return
         return_move._action_confirm()
         return_move._action_assign()
         return_move._action_done()
+
+        # Update reference for traceability
+        move.write({
+            'reference': f"{move.reference or ''} → Reversed by {return_move.reference}",
+        })
 
         return return_move
 
@@ -302,11 +242,11 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
             old_move.unlink()
 
         # Fallback accounts
-        default_expense = self.env['account.account'].search([('account_type', '=', 'expense')], limit=1)
-        default_payable = self.env['account.account'].search([('account_type', '=', 'liability_payable')], limit=1)
+        expense_account = self.env['account.account'].search([('account_type', '=', 'expense')], limit=1)
+        payable_account = order.bank_account_id
         journal = self.env['account.journal'].search([('type', '=', 'general')], limit=1)
 
-        if not (default_expense and default_payable and journal):
+        if not (expense_account and payable_account and journal):
             raise UserError(_("Please configure Expense, Payable accounts, and a General Journal."))
 
         # Build journal move
@@ -314,7 +254,7 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
         for line in order.order_line.filtered('active'):
             move_lines.append((0, 0, {
                 'name': f"{line.product_id.display_name} ({order.name})",
-                'account_id': line.product_id.categ_id.property_account_expense_categ_id.id or default_expense.id,
+                'account_id': line.product_id.categ_id.property_account_expense_categ_id.id or expense_account.id,
                 'debit': line.total,
                 'credit': 0.0,
                 'partner_id': line.vendor_id.id,
@@ -323,7 +263,7 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
 
             move_lines.append((0, 0, {
                 'name': order.vendor_id.name,
-                'account_id': order.vendor_id.property_account_payable_id.id or default_payable.id,
+                'account_id': payable_account.id,
                 'credit': line.total,
                 'debit': 0.0,
                 'partner_id': line.vendor_id.id,
@@ -347,14 +287,16 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
         move.message_post(
             body=_(
                 "Journal Entry created/updated via Backorder Purchase Update Wizard for order <b>%s</b>.") % order.name,
-            subtype_xmlid="mail.mt_note"
+            subtype_xmlid="mail.mt_note",
+            body_is_html=True
         )
 
         # ✅ Also post to the related order chatter (if enabled)
         if hasattr(order, 'message_post'):
             order.message_post(
                 body=_("New Journal Entry <b>%s</b> was created and linked.") % move.name,
-                subtype_xmlid="mail.mt_note"
+                subtype_xmlid="mail.mt_note",
+                body_is_html=True
             )
 
     # ------------------------------------------------------------

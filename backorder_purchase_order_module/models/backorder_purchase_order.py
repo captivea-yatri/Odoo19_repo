@@ -19,14 +19,21 @@ class BackorderPurchaseOrder(models.Model):
     move_ids = fields.Many2many('stock.move', 'bo_purchase_stock_move_rel', 'bo_purchase_id', 'move_id',
                                 string="Stock Moves")
     vendor_id = fields.Many2one('res.partner', string='Company', required=True)
+    bank_account_id = fields.Many2one('account.account',
+        string='Bank Account',
+        help="Set Accounts to Manage the Manual Cash Given",
+        tracking=True,
+        check_company=True,)
     account_move_id = fields.Many2one('account.move', string='Journal Entry', readonly=True)
-    account_move_ids = fields.Many2many(
-        'account.move',
-        'bo_purchase_account_move_rel',
-        'bo_purchase_id', 'move_id',
-        string='Journal Entries',
-        readonly=True
-    )
+    # account_move_ids = fields.Many2many(
+    #     'account.move',
+    #     'bo_purchase_account_move_rel',
+    #     'bo_purchase_id', 'move_id',
+    #     string='Journal Entries',
+    #     readonly=True
+    # )
+
+
 
     @api.onchange('vendor_id')
     def _onchange_vendor_id_set_on_lines(self):
@@ -66,36 +73,25 @@ class BackorderPurchaseOrder(models.Model):
                 raise UserError(_("You can only confirm a draft order."))
 
             vendor = order.vendor_id
+            banckaccount=order.bank_account_id
             vendor_location = vendor.property_stock_supplier or self.env.ref('stock.stock_location_suppliers')
             stock_location = self.env.ref('stock.stock_location_stock')
+
 
             total_amount = 0.0
             created_moves = []
 
             # ✅ Group by product (only one move per product)
-            product_groups = {}
+            # ✅ Create one move per product line
             for line in order.order_line:
-                key = line.product_id.id
-                if key not in product_groups:
-                    product_groups[key] = {
-                        'product': line.product_id,
-                        'qty': line.quantity,
-                        'price': line.price,
-                        'vendor': line.vendor_id,
-                    }
-                else:
-                    product_groups[key]['qty'] += line.quantity
-
-            # ✅ Create one move per product
-            for data in product_groups.values():
-                product = data['product']
-                qty = data['qty']
-                price_unit = data['price']
-                vendor_line = data['vendor']
+                product = line.product_id
+                qty = line.quantity
+                price_unit = line.price
+                vendor_line = line.vendor_id
                 total_value = qty * price_unit
                 total_amount += total_value
 
-                # ✅ Create Stock Move (sets both reference + origin)
+                # ✅ Create Stock Move (linked to order line)
                 move = self.env['stock.move'].create({
                     'product_id': product.id,
                     'product_uom': product.uom_id.id,
@@ -103,15 +99,16 @@ class BackorderPurchaseOrder(models.Model):
                     'location_dest_id': stock_location.id,
                     'product_uom_qty': qty,
                     'price_unit': price_unit,
-                    'value': total_value,  # quantity × price
+                    'value': total_value,
                     'state': 'draft',
-                    'origin': order.name,  # appears in stock move & product history
-                    'reference': order.name,  # also appears in product move tab
+                    'origin': order.name,
+                    'reference': order.name,
                     'company_id': order.company_id.id,
                     'partner_id': vendor_line.id,
+                    'backorder_line_id': line.id,  # ✅ linking line to move
                 })
 
-                # ✅ Add move line
+                # ✅ Create corresponding move line
                 self.env['stock.move.line'].create({
                     'move_id': move.id,
                     'product_id': product.id,
@@ -122,18 +119,19 @@ class BackorderPurchaseOrder(models.Model):
                     'company_id': order.company_id.id,
                 })
 
-                # Process the move
+                # ✅ Process move
                 move._action_confirm()
                 move._action_assign()
                 move._action_done()
 
-                # ✅ Ensure reference persists after done
+                # ✅ Persist value & reference
                 move.write({
                     'value': qty * price_unit,
-                    'origin': order.name,
                     'reference': order.name,
                 })
 
+                # ✅ Link move to line
+                line.move_id = [(4, move.id)]
                 created_moves.append(move.id)
 
             # ✅ Link moves to order
@@ -145,7 +143,7 @@ class BackorderPurchaseOrder(models.Model):
                 raise UserError(_("Cannot create a Journal Entry without a total amount."))
 
             expense_account = self.env['account.account'].search([('account_type', '=', 'expense')], limit=1)
-            payable_account = self.env['account.account'].search([('account_type', '=', 'liability_payable')], limit=1)
+            payable_account = order.bank_account_id
             journal = self.env['account.journal'].search([('type', '=', 'general')], limit=1)
 
             if not (expense_account and payable_account and journal):
@@ -157,6 +155,7 @@ class BackorderPurchaseOrder(models.Model):
                 'date': fields.Date.context_today(self),
                 'ref': order.name,
                 'line_ids': [
+                    # ✅ Debit: Expense
                     (0, 0, {
                         'name': f'Backorder Purchase Expense ({order.name})',
                         'account_id': expense_account.id,
@@ -164,11 +163,12 @@ class BackorderPurchaseOrder(models.Model):
                         'credit': 0.0,
                         'partner_id': order.order_line[0].vendor_id.id,
                     }),
+                    # ✅ Credit: Payable to delivery boy
                     (0, 0, {
-                        'name': f'Payable to Vendor ({order.name})',
+                        'name': f'Payable to Delivery ',
                         'account_id': payable_account.id,
-                        'credit': total_amount,
                         'debit': 0.0,
+                        'credit': total_amount,
                         'partner_id': order.order_line[0].vendor_id.id,
                     }),
                 ]
@@ -181,9 +181,10 @@ class BackorderPurchaseOrder(models.Model):
             # ✅ Mark confirmed
             order.state = 'confirm'
             order.message_post(
-                body=_("Backorder Purchase Order <b>%s</b> confirmed. "
+                body=_("Backorder Purchase Order <b> %s </b> confirmed. "
                        "<br/>Stock Moves updated with reference & total value.") % order.name,
-                subtype_xmlid="mail.mt_note"
+                subtype_xmlid="mail.mt_note",
+            body_is_html = True
             )
 
     # def action_set_to_draft(self):
@@ -260,6 +261,8 @@ class BackorderPurchaseOrderLine(models.Model):
     currency_id = fields.Many2one('res.currency', 'Currency', related='company_id.currency_id', readonly=True,
                                   required=True)
     move_id = fields.Many2many('stock.move',  string="Stock Moves")
+
+
 
 
     @api.depends('quantity', 'price')

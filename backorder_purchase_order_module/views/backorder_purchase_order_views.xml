@@ -44,6 +44,7 @@
                         <group>
                             <field name="name" readonly="1"/>
                             <field name="vendor_id" readonly="state == 'confirm'"/>
+                            <field name="bank_account_id" readonly="state == 'confirm'"/>
                         </group>
                         <notebook>
                             <page name="purchase_line" string="Lines">
