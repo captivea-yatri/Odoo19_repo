@@ -126,7 +126,7 @@ class BackorderPurchaseOrder(models.Model):
 
                 # ✅ Persist value & reference
                 move.write({
-                    'value': qty * price_unit,
+                    'value': total_value,
                     'reference': order.name,
                 })
 

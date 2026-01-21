@@ -11,7 +11,6 @@
         'data/ir.sequence.xml',
         'views/action_menu.xml',
         'views/backorder_purchase_order_views.xml',
-        'views/stock_moves_view.xml',
         'wizard/update_order_line_wiz_view.xml',
     ],
     'installable': True,

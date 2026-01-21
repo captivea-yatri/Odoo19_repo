@@ -1,4 +1,4 @@
-from odoo import models, fields
+from odoo import models, fields,api
 
 class StockMove(models.Model):
     _inherit = 'stock.move'
@@ -10,3 +10,5 @@ class StockMove(models.Model):
         index=True,
         help="Links this stock move to its originating Backorder Purchase Order Line."
     )
+
+    qty_done = fields.Float(string='Quantity', help="Quantity of Stock Move",index=True)
