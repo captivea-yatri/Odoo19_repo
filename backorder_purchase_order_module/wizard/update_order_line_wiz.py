@@ -63,41 +63,50 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
                 move.action_post()
 
         # 3️⃣ Update or create order lines
-        existing_line_ids = [l.line_id.id for l in self.line_ids if l.line_id]
-        for line in order.order_line:
-            if line.id not in existing_line_ids:
-                line.with_context(ctx).write({'active': False})
 
+        existing_line_ids = set(order.order_line.ids)
+        wizard_line_ids = set([l.line_id.id for l in self.line_ids if l.line_id])
+        removed_line_ids = existing_line_ids - wizard_line_ids
+
+        if removed_line_ids:
+            removed_lines = order.order_line.browse(removed_line_ids)
+            for line in removed_lines:
+                # find linked move
+                move = self.env['stock.move'].search([('backorder_line_id', '=', line.id)], limit=1)
+                if move:
+                    if move.state == 'done':
+                        # ✅ reverse the done move
+                        self._create_return_move(move)
+                        order.message_post(
+                            body=_("Reversed move for deleted line <b>%s</b>.") %
+                                 (line.product_id.display_name,),
+                            subtype_xmlid="mail.mt_note",
+                            body_is_html=True,
+                        )
+                    else:
+                        move.unlink()
+                # finally remove the order line
+                line.unlink()
+
+        # 🟩 Apply or update remaining lines (existing or new)
         total_qty = 0
         total_value = 0
-
         for wiz_line in self.line_ids:
-            # 🔍 Try to find the linked order line
-            order_line = wiz_line.line_id
-
-            if not order_line:
-                # Try to find an existing order line by product/vendor combo
-                order_line = order.order_line.filtered(
-                    lambda l: l.product_id == wiz_line.product_id and l.vendor_id == wiz_line.vendor_id
-                )[:1]
-
             vals = {
                 'product_id': wiz_line.product_id.id,
                 'vendor_id': wiz_line.vendor_id.id,
                 'quantity': wiz_line.quantity,
                 'price': wiz_line.price,
             }
-
-            if order_line:
-                order_line.with_context(ctx).write(vals)
-                line = order_line
+            if wiz_line.line_id:
+                wiz_line.line_id.with_context(ctx).write(vals)
+                line = wiz_line.line_id
             else:
                 vals['order_id'] = order.id
                 line = self.env['backorder.purchase.order.line'].with_context(ctx).create(vals)
 
             total_qty += line.quantity
             total_value += line.total
-
         # 4️⃣ Update stock moves (with reuse logic)
         self._update_or_create_stock_moves(order)
 
@@ -151,8 +160,6 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
             # 🔍 Fetch move linked to this order line
             move = StockMove.search([('backorder_line_id', '=', line.id)], limit=1)
 
-
-
             if move:
                 # ✅ Update move with new quantity/price
                 move.write({
@@ -166,7 +173,6 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
                 if move.move_line_ids:
                     move.move_line_ids.write({
                         'qty_done': qty,
-                        'quantity': qty,
                         'product_uom_id': product.uom_id.id,
                         'location_id': vendor_location.id,
                         'location_dest_id': stock_location.id,
@@ -176,7 +182,6 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
                         'move_id': move.id,
                         'product_id': product.id,
                         'product_uom_id': product.uom_id.id,
-                        'quantity': qty,
                         'qty_done': qty,
                         'location_id': vendor_location.id,
                         'location_dest_id': stock_location.id,
@@ -206,9 +211,8 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
                     'move_id': move.id,
                     'product_id': product.id,
                     'product_uom_id': product.uom_id.id,
-                  'qty_done': qty,
-                    'quantity': qty,
-                    'location_id': vendor_location.id,
+                    'qty_done': qty,
+                     'location_id': vendor_location.id,
                     'location_dest_id': stock_location.id,
                     'company_id': order.company_id.id,
                 })
@@ -235,6 +239,46 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
         if updated_moves:
             order.write({'move_ids': [(6, 0, list(set(updated_moves)))]})
 
+    def _create_return_move(self, move):
+        """Reverse a done stock move safely and keep proper reference."""
+        StockMove = self.env['stock.move']
+
+        return_move = StockMove.create({
+            'product_id': move.product_id.id,
+            'product_uom': move.product_uom.id,
+            'product_uom_qty': move.product_uom_qty,
+            'price_unit': move.price_unit,
+            'value': move.value,
+            'location_id': move.location_dest_id.id,  # reverse direction
+            'location_dest_id': move.location_id.id,
+            'origin': f"Return of {move.origin or move.reference}",
+            'reference': f"{move.reference or move.origin} (Reversal)",
+            'company_id': move.company_id.id,
+            'partner_id': move.partner_id.id,
+            'state': 'draft',
+        })
+
+        # Reverse quantities
+        self.env['stock.move.line'].create({
+            'move_id': return_move.id,
+            'product_id': move.product_id.id,
+            'product_uom_id': move.product_uom.id,
+            'qty_done': move.product_uom_qty,
+            'location_id': move.location_dest_id.id,
+            'location_dest_id': move.location_id.id,
+            'company_id': move.company_id.id,
+        })
+
+        return_move._action_confirm()
+        return_move._action_assign()
+        return_move._action_done()
+
+        # Update reference for traceability
+        move.write({
+            'reference': f"{move.reference or ''} → Reversed by {return_move.reference}",
+        })
+
+        return return_move
 
 
 
@@ -312,7 +356,6 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
         for line in order.order_line.filtered('active'):
             if move.product_id == line.product_id:
                 line.product_id.standard_price = line.price
-
     def _recompute_product_cost(self, product):
         """Recalculate average cost based on stock quant."""
         quant = self.env['stock.quant'].search([
