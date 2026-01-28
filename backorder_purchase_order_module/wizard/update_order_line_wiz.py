@@ -71,21 +71,6 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
         if removed_line_ids:
             removed_lines = order.order_line.browse(removed_line_ids)
             for line in removed_lines:
-                # find linked move
-                move = self.env['stock.move'].search([('backorder_line_id', '=', line.id)], limit=1)
-                if move:
-                    if move.state == 'done':
-                        # ✅ reverse the done move
-                        self._create_return_move(move)
-                        order.message_post(
-                            body=_("Reversed move for deleted line <b>%s</b>.") %
-                                 (line.product_id.display_name,),
-                            subtype_xmlid="mail.mt_note",
-                            body_is_html=True,
-                        )
-                    else:
-                        move.unlink()
-                # finally remove the order line
                 line.unlink()
 
         # 🟩 Apply or update remaining lines (existing or new)
@@ -98,6 +83,7 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
                 'quantity': wiz_line.quantity,
                 'price': wiz_line.price,
             }
+
             if wiz_line.line_id:
                 wiz_line.line_id.with_context(ctx).write(vals)
                 line = wiz_line.line_id
@@ -152,26 +138,31 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
 
 
         for line in order.order_line.filtered('active'):
+
             product = line.product_id
             qty = line.quantity
             price_unit = line.price
             total_value = qty*price_unit
 
+
+
             # 🔍 Fetch move linked to this order line
-            move = StockMove.search([('backorder_line_id', '=', line.id)], limit=1)
+            move = self.env['stock.move'].search([('backorder_line_id', '=', line.id)], limit=1)
 
             if move:
-                # ✅ Update move with new quantity/price
-                move.write({
-                    'product_uom_qty': qty,
+                move.with_context(manual_move_update=True).sudo().write({
                     'price_unit': price_unit,
-                    'value': total_value,
+                    'product_id': product.id,
+                    'product_uom_qty': qty,
+                    'reference': order.name,
                 })
 
+                move.with_context(manual_move_update=True).sudo().write({'value': qty * price_unit, })
 
                 # ✅ Update move line or create if missing
                 if move.move_line_ids:
                     move.move_line_ids.write({
+                        'quantity': qty,
                         'qty_done': qty,
                         'product_uom_id': product.uom_id.id,
                         'location_id': vendor_location.id,
@@ -179,9 +170,10 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
                     })
                 else:
                     StockMoveLine.create({
-                        'move_id': move.id,
+                        # 'move_id': move.id,
                         'product_id': product.id,
                         'product_uom_id': product.uom_id.id,
+                        'quantity': qty,
                         'qty_done': qty,
                         'location_id': vendor_location.id,
                         'location_dest_id': stock_location.id,
@@ -191,7 +183,7 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
 
             else:
                 # 🆕 Create new move for new order line
-                move = StockMove.create({
+                move = StockMove.with_context(manual_move_update=True).create({
                     'product_id': product.id,
                     'product_uom': product.uom_id.id,
                     'location_id': vendor_location.id,
@@ -208,40 +200,45 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
                 })
 
                 StockMoveLine.create({
-                    'move_id': move.id,
+                    # 'move_id': move.id,
                     'product_id': product.id,
                     'product_uom_id': product.uom_id.id,
+                    'quantity': qty,
                     'qty_done': qty,
                      'location_id': vendor_location.id,
                     'location_dest_id': stock_location.id,
                     'company_id': order.company_id.id,
                 })
 
+
             move._action_confirm()
             move._action_assign()
-            move._action_done()
+            move.with_context(manual_move_update=True)._action_done()
 
+            # self._recompute_product_cost(move.product_id)
 
-
-            move.sudo().write({
-                'value': total_value,
-                'reference': order.name,
-            })
-
-            # ✅ Ensure link between move and order line
-            if move.id not in line.move_id.ids:
-                line.move_id = [(4, move.id)]
 
             updated_moves.append(move.id)
-            self._update_stock_value(order, move)
-
-        # ✅ Update order’s move list
+            # move.sudo().write({
+            #     'product_id': product.id,
+            #     'product_uom_qty': qty,
+            #     'price_unit': price_unit,
+            #     'reference': order.name,
+            # })
+            move.with_context(manual_move_update=True).sudo().write({'value':qty*price_unit,})
         if updated_moves:
-            order.write({'move_ids': [(6, 0, list(set(updated_moves)))]})
+            order.write({'move_ids': [(4, mid) for mid in updated_moves]})
+            # order.write({'move_ids': [(6, 0, list(set(updated_moves)))]})
+
+
+
+
+
 
     def _create_return_move(self, move):
         """Reverse a done stock move safely and keep proper reference."""
         StockMove = self.env['stock.move']
+
 
         return_move = StockMove.create({
             'product_id': move.product_id.id,
@@ -351,19 +348,38 @@ class BackorderPurchaseUpdateWizard(models.TransientModel):
     # ------------------------------------------------------------
     # Product cost updates
     # ------------------------------------------------------------
-    def _update_stock_value(self, order, move):
-        """Update product's last cost from new move."""
-        for line in order.order_line.filtered('active'):
-            if move.product_id == line.product_id:
-                line.product_id.standard_price = line.price
+
     def _recompute_product_cost(self, product):
-        """Recalculate average cost based on stock quant."""
-        quant = self.env['stock.quant'].search([
+        """
+        Recalculate product standard_price as weighted average of all done incoming moves
+        (supplier → internal). Does NOT change past move values like PO2.
+        """
+
+        StockMove = self.env['stock.move']
+
+        # ✅ Only consider done incoming moves for this product
+        done_in_moves = StockMove.search([
             ('product_id', '=', product.id),
-            ('location_id.usage', '=', 'internal')
-        ], limit=1)
-        if quant and quant.quantity:
-            product.standard_price = quant.value / quant.quantity
+            ('state', '=', 'done'),
+            ('location_id.usage', '=', 'supplier'),
+            ('location_dest_id.usage', '=', 'internal')
+        ])
+
+        total_qty = 0.0
+        total_value = 0.0
+        for move in done_in_moves:
+            total_qty += move.product_uom_qty
+            total_value += move.value  # use stored move.value (not recomputed)
+
+        if total_qty <= 0:
+            return
+
+        avg_cost = total_value / total_qty
+
+        # ✅ Update product cost only
+        product.sudo().write({'standard_price': avg_cost})
+
+
 
 
 # ------------------------------------------------------------

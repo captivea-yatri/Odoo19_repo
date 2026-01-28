@@ -13,25 +13,19 @@ class BackorderPurchaseOrder(models.Model):
         ('draft', 'Draft'),
         ('confirm', 'Confirmed'),
     ], default='draft', string='Status')
-    company_id = fields.Many2one('res.company', string='Vendor', required=True, default=lambda self: self.env.company)
+    company_id = fields.Many2one('res.company', string='Company', required=True, default=lambda self: self.env.company)
 
     order_line = fields.One2many('backorder.purchase.order.line', 'order_id', string='Order Lines')
     move_ids = fields.Many2many('stock.move', 'bo_purchase_stock_move_rel', 'bo_purchase_id', 'move_id',
                                 string="Stock Moves")
-    vendor_id = fields.Many2one('res.partner', string='Company', required=True)
+    vendor_id = fields.Many2one('res.partner', string='Vendor', required=True)
     bank_account_id = fields.Many2one('account.account',
-        string='Bank Account',
+        string='Account',
         help="Set Accounts to Manage the Manual Cash Given",
         tracking=True,
         check_company=True,)
     account_move_id = fields.Many2one('account.move', string='Journal Entry', readonly=True)
-    # account_move_ids = fields.Many2many(
-    #     'account.move',
-    #     'bo_purchase_account_move_rel',
-    #     'bo_purchase_id', 'move_id',
-    #     string='Journal Entries',
-    #     readonly=True
-    # )
+
 
 
 
@@ -125,18 +119,28 @@ class BackorderPurchaseOrder(models.Model):
                 move._action_done()
 
                 # ✅ Persist value & reference
+
                 move.write({
                     'value': total_value,
                     'reference': order.name,
                 })
 
+
                 # ✅ Link move to line
                 line.move_id = [(4, move.id)]
                 created_moves.append(move.id)
 
-            # ✅ Link moves to order
+                self._recompute_product_cost(line.product_id)
+            # # ✅ Link moves to order
             if created_moves:
                 order.move_ids = [(6, 0, created_moves)]
+
+            for move in order.move_ids:
+                line = order.order_line.filtered(lambda line: line.id == move.backorder_line_id.id)
+                move.value = line.quantity * line.price
+
+
+
 
             # ✅ Accounting entry (as before)
             if total_amount <= 0:
@@ -204,15 +208,7 @@ class BackorderPurchaseOrder(models.Model):
             'res_model': 'stock.move',
             'views': [(view_id, 'list')],
             'domain': [('id', 'in', self.move_ids.ids)],
-            # 'context': {
-            #     'default_picking_id': self.id,
-            #     'default_location_id': self.location_id.id,
-            #     'default_location_dest_id': self.location_dest_id.id,
-            #     'default_company_id': self.company_id.id,
-            #     'show_lots_text': self.show_lots_text,
-            #     'picking_code': self.picking_type_code,
-            #     'create': self.state not in ('done', 'cancel'),
-            # }
+
         }
 
     def action_view_account_move(self):
@@ -242,6 +238,18 @@ class BackorderPurchaseOrder(models.Model):
                 'default_vendor_id': self.vendor_id.id,
             }
         }
+
+    def _recompute_product_cost(self, product):
+        """Recalculate average cost based on stock quant."""
+        quant = self.env['stock.quant'].search([
+            ('product_id', '=', product.id),
+            ('location_id.usage', '=', 'internal')
+        ], limit=1)
+        if quant and quant.quantity:
+            product.standard_price= quant.value / quant.quantity
+
+
+
 
 
 class BackorderPurchaseOrderLine(models.Model):
